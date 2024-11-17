@@ -1,0 +1,177 @@
+import os
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from skimage import io
+from skimage.transform import resize
+from sklearn.metrics import mean_squared_error
+from tqdm import tqdm
+import torch.nn.functional as F
+
+def load_images_from_directory(directory):
+    images = []
+    for filename in sorted(os.listdir(directory)):
+        if filename.endswith('.tiff'):
+            img_path = os.path.join(directory, filename)
+            try:
+                img = io.imread(img_path)
+                images.append(img)
+            except Exception as e:
+                print(f"Error loading image {filename}: {e}")
+    return images
+ 
+def load_images(base_path):
+    trackerN_ims = load_images_from_directory(f"{base_path}/trackerN")
+    trackerP_ims = load_images_from_directory(f"{base_path}/trackerP")
+    emcal_ims = load_images_from_directory(f"{base_path}/emcal")
+    hcal_ims = load_images_from_directory(f"{base_path}/hcal")
+    truth_ims = load_images_from_directory(f"{base_path}/truth")
+    return trackerN_ims, trackerP_ims, emcal_ims, hcal_ims, truth_ims
+ 
+def sample_pixels(trackerN_im, trackerP_im, emcal_im, hcal_im, truth_im, num_samples=1000):
+    height, width = trackerN_im.shape  
+    total_pixels = height * width
+    actual_samples = min(num_samples, total_pixels)
+    indices = random.sample(range(total_pixels), actual_samples)
+    trackerN_samples = trackerN_im.flatten()[indices]
+    trackerP_samples = trackerP_im.flatten()[indices]
+    emcal_samples = emcal_im.flatten()[indices]
+    hcal_samples = hcal_im.flatten()[indices]
+    truth_samples = truth_im.flatten()[indices]
+    return trackerN_samples, trackerP_samples, emcal_samples, hcal_samples, truth_samples, height, width
+ 
+class UNet(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(UNet, self).__init__()
+        self.encoder1 = self.conv_block(in_channels, 32)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.encoder2 = self.conv_block(32, 64)
+        self.encoder3 = self.conv_block(64, 128)
+        self.encoder4 = self.conv_block(128, 256)
+ 
+        self.upconv1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.decoder1 = self.conv_block(256, 128)
+        self.upconv2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.decoder2 = self.conv_block(128, 64)
+        self.upconv3 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.decoder3 = self.conv_block(64, 32)
+        self.final_conv = nn.Conv2d(32, out_channels, kernel_size=1)
+ 
+    def conv_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True)
+        )
+ 
+    def crop(self, input, target):
+        _, _, h_input, w_input = input.size()
+        _, _, h_target, w_target = target.size()
+        return input[:, :, :h_target, :w_target]
+ 
+    def forward(self, x):
+        enc1 = self.encoder1(x)
+        enc2 = self.encoder2(self.pool(enc1))
+        enc3 = self.encoder3(self.pool(enc2))
+        enc4 = self.encoder4(self.pool(enc3))
+ 
+        up1 = self.upconv1(enc4)
+        up1 = self.crop(up1, enc3)
+        dec1 = self.decoder1(torch.cat([up1, enc3], 1)) 
+ 
+        up2 = self.upconv2(dec1)
+        up2 = self.crop(up2, enc2)
+        up2 = F.interpolate(up2, size=enc2.shape[2:], mode='bilinear', align_corners=True) 
+        dec2 = self.decoder2(torch.cat([up2, enc2], 1)) 
+ 
+        up3 = self.upconv3(dec2)
+        up3 = self.crop(up3, enc1)
+        up3 = F.interpolate(up3, size=enc1.shape[2:], mode='bilinear', align_corners=True) 
+        dec3 = self.decoder3(torch.cat([up3, enc1], 1)) 
+ 
+        final_out = self.final_conv(dec3)
+        return final_out
+ 
+def train_and_predict_unet(trackerN_samples, trackerP_samples, emcal_samples, hcal_samples, truth_samples, height, width, num_epochs=70, learning_rate=0.001):
+    factors = np.stack((trackerN_samples, trackerP_samples, emcal_samples, hcal_samples), axis=1)
+    factors = factors.reshape(-1, 4, height, width)  
+    X_train = torch.tensor(factors, dtype=torch.float32)
+    y_train = torch.tensor(truth_samples.reshape(-1, 1, height, width), dtype=torch.float32)
+ 
+    model = UNet(4, 1) 
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+ 
+    for epoch in range(num_epochs):
+        model.train()
+        optimizer.zero_grad()
+        outputs = model(X_train)
+        loss = criterion(outputs, y_train)
+        loss.backward()
+        optimizer.step()
+ 
+    model.eval()
+    with torch.no_grad():
+        predictions = model(X_train).numpy()
+ 
+    predictions = np.nan_to_num(predictions)
+    y_train_numpy = y_train.numpy().flatten()
+    y_train_numpy = np.nan_to_num(y_train_numpy)
+ 
+    mse = mean_squared_error(y_train_numpy, predictions.flatten())
+    return predictions, mse
+ 
+def main():
+    base_path = 'C:/Users/ROG/Documents/gauss2.0'
+    trackerN_ims, trackerP_ims, emcal_ims, hcal_ims, truth_ims = load_images(base_path)
+ 
+    if not (trackerN_ims and trackerP_ims and emcal_ims and hcal_ims and truth_ims):
+        print("Error: One or more image lists are empty.")
+        return
+ 
+    image_names = {
+        'trackerN': len(trackerN_ims),
+        'trackerP': len(trackerP_ims),
+        'emcal': len(emcal_ims),
+        'hcal': len(hcal_ims),
+        'truth': len(truth_ims)
+    }
+ 
+    all_truth = []
+    all_pred = []
+    mses = []
+ 
+    target_size = (9, 9)  
+    for i in tqdm(range(len(trackerN_ims))):
+        if i >= len(trackerP_ims) or i >= len(emcal_ims) or i >= len(hcal_ims) or i >= len(truth_ims):
+            print(f"Error: Image lists are not the same length at index {i}.")
+            break
+        trackerN_im = resize(trackerN_ims[i], target_size)
+        trackerP_im = resize(trackerP_ims[i], target_size)
+        emcal_im = resize(emcal_ims[i], target_size)
+        hcal_im = resize(hcal_ims[i], target_size)
+        truth_im = resize(truth_ims[i], target_size)
+ 
+        trackerN_samples, trackerP_samples, emcal_samples, hcal_samples, truth_samples, height, width = sample_pixels(trackerN_im, trackerP_im, emcal_im, hcal_im, truth_im)
+ 
+        predictions, mse = train_and_predict_unet(trackerN_samples, trackerP_samples, emcal_samples, hcal_samples, truth_samples, height, width)
+ 
+        all_truth.extend(truth_samples)
+        all_pred.extend(predictions.flatten())
+        mses.append(mse)
+ 
+    plot_results(all_truth, all_pred, mses)
+    if all_truth and all_pred:
+        all_truth = np.array(all_truth)
+        all_pred = np.array(all_pred)
+        mse = mean_squared_error(all_truth, all_pred)
+        print(f"The Mean Squared Error (MSE) is: {mse}")
+    else:
+        print("Error: The lists all_truth or all_pred are empty.")
+ 
+if __name__ == "__main__":
+    main()
