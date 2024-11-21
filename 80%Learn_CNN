@@ -1,0 +1,195 @@
+import os
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from skimage import io
+from sklearn.metrics import mean_squared_error
+import pandas as pd
+from tqdm import tqdm
+
+def load_images_from_directory(directory):
+    images = []
+    for filename in sorted(os.listdir(directory)):
+        if filename.endswith('.tiff'):
+            img_path = os.path.join(directory, filename)
+            img = io.imread(img_path)
+            images.append(img)
+    return images
+
+def load_images(base_path):
+    trackerN_ims = load_images_from_directory(f"{base_path}/trackerN")
+    trackerP_ims = load_images_from_directory(f"{base_path}/trackerP")
+    emcal_ims = load_images_from_directory(f"{base_path}/emcal")
+    hcal_ims = load_images_from_directory(f"{base_path}/hcal")
+    truth_ims = load_images_from_directory(f"{base_path}/truth")
+    return trackerN_ims, trackerP_ims, emcal_ims, hcal_ims, truth_ims
+
+def split_data(images, split_ratio=0.8):
+    train_size = int(len(images) * split_ratio)
+    indices = list(range(len(images)))
+    random.shuffle(indices)
+    train_indices = indices[:train_size]
+    test_indices = indices[train_size:]
+    return train_indices, test_indices
+
+def sample_pixels(trackerN_im, trackerP_im, emcal_im, hcal_im, truth_im, num_samples=1000):
+    height, width = trackerN_im.shape
+    total_pixels = height * width
+    actual_samples = min(num_samples, total_pixels)
+    
+    indices = random.sample(range(total_pixels), actual_samples)
+    
+    trackerN_samples = trackerN_im.flatten()[indices]
+    trackerP_samples = trackerP_im.flatten()[indices]
+    emcal_samples = emcal_im.flatten()[indices]
+    hcal_samples = hcal_im.flatten()[indices]
+    truth_samples = truth_im.flatten()[indices]
+    
+    return trackerN_samples, trackerP_samples, emcal_samples, hcal_samples, truth_samples, height, width
+
+class CNNModel(nn.Module):
+    def __init__(self, height, width):
+        super(CNNModel, self).__init__()
+        self.height = height
+        self.width = width
+        self.conv1 = nn.Conv2d(4, 16, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(32 * height * width, 1000)
+        self.fc2 = nn.Linear(1000, height * width)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+        x = x.view(x.size(0), -1)  
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x.view(x.size(0), 1, self.height, self.width)  
+
+def train_and_predict(trackerN_samples, trackerP_samples, emcal_samples, hcal_samples, truth_samples, height, width, num_epochs=100, learning_rate=0.01):
+    factors = np.stack((trackerN_samples, trackerP_samples, emcal_samples, hcal_samples), axis=1)
+    factors = factors.reshape(-1, 4, height, width)  
+    X_train = torch.tensor(factors, dtype=torch.float32)
+    y_train = torch.tensor(truth_samples.reshape(-1, 1, height, width), dtype=torch.float32)
+
+    model = CNNModel(height, width)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    for epoch in range(num_epochs):
+        model.train()
+        optimizer.zero_grad()
+        outputs = model(X_train)
+        loss = criterion(outputs, y_train)
+        loss.backward()
+        optimizer.step()
+
+    model.eval()
+    with torch.no_grad():
+        predictions = model(X_train).numpy()
+    
+    mse = mean_squared_error(y_train.numpy().flatten(), predictions.flatten())
+    
+    return predictions, mse
+
+def plot_results(all_truth, all_pred, mses):
+    all_truth = np.array(all_truth)
+    all_pred = np.array(all_pred)
+    
+    plt.figure(figsize=(8, 8))
+    plt.scatter(all_truth, all_pred, alpha=0.5)
+    plt.xlabel("Truth Pixel Value")
+    plt.ylabel("Predicted Pixel Value")
+    plt.title("Overall Scatter Plot of Predicted vs Truth")
+    plt.plot([min(all_truth), max(all_truth)], [min(all_truth), max(all_truth)], 'r--') 
+    plt.grid(True)
+    plt.show()
+
+    plt.figure(figsize=(8, 6))
+    plt.hist(mses, bins=20, alpha=0.7)
+    plt.xlabel("Mean Squared Error")
+    plt.ylabel("Frequency")
+    plt.title("Histogram of Mean Squared Errors")
+    plt.grid(True)
+    plt.show()
+
+    low_energy_indices = np.where(all_truth < 10)
+    low_energy_truth = all_truth[low_energy_indices]
+    low_energy_pred = all_pred[low_energy_indices]
+
+    plt.figure(figsize=(8, 8))
+    plt.scatter(low_energy_truth, low_energy_pred, alpha=0.5)
+    plt.xlabel("Truth Pixel Value (Low Energy)")
+    plt.ylabel("Predicted Pixel Value (Low Energy)")
+    plt.title("Scatter Plot of Predicted vs Truth (Low Energy)")
+    plt.plot([min(low_energy_truth), max(low_energy_truth)], [min(low_energy_truth), max(low_energy_truth)], 'r--') 
+    plt.grid(True)
+    plt.show()
+
+def create_flowchart(image_names):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.axis('off')
+    ax.text(0.5, 1, 'Image Processing Flow', horizontalalignment='center', fontsize=12, fontweight='bold')
+    
+    for i, image_name in enumerate(image_names):
+        ax.text(0.5, 0.8 - i*0.2, f'{i+1}. Process {image_name}', horizontalalignment='center', bbox=dict(facecolor='lightgray', edgecolor='black'))
+        if i > 0:
+            ax.annotate('', xy=(0.5, 0.8 - i*0.2 + 0.05), xytext=(0.5, 0.8 - (i-1)*0.2 - 0.05),
+                        arrowprops=dict(facecolor='black', shrink=0.05))
+
+    plt.show()
+
+def process_set(base_path, num_samples=1000, split_ratio=0.8):
+    trackerN_ims, trackerP_ims, emcal_ims, hcal_ims, truth_ims = load_images(base_path)
+    
+    train_indices, test_indices = split_data(trackerN_ims, split_ratio)
+
+    mses = []
+    all_truth = []
+    all_pred = []
+
+    image_order = ["trackerN", "trackerP", "emcal", "hcal", "truth"]
+
+    for idx in tqdm(train_indices, desc="Training on images"):
+        trackerN_samples, trackerP_samples, emcal_samples, hcal_samples, truth_samples, height, width = sample_pixels(
+            trackerN_ims[idx], trackerP_ims[idx], emcal_ims[idx], hcal_ims[idx], truth_ims[idx], num_samples
+        )
+        
+        im_pred_samples, mse = train_and_predict(trackerN_samples, trackerP_samples, emcal_samples, hcal_samples, truth_samples, height, width)
+        mses.append(mse)
+        
+        all_truth.extend(truth_samples)
+        all_pred.extend(im_pred_samples)
+
+    metrics_df = pd.DataFrame({
+        'Metric': ['Mean Squared Error'],
+        'Value': [np.mean(mses)]
+    })
+    print("\nMetrics Table (Training):")
+    print(metrics_df.to_string(index=False))
+    
+    plot_results(all_truth, all_pred, mses)
+    create_flowchart(image_order)
+    
+    test_mses = []
+    print("\nTesting on images...")
+    for idx in tqdm(test_indices, desc="Testing on images"):
+        trackerN_samples, trackerP_samples, emcal_samples, hcal_samples, truth_samples, height, width = sample_pixels(
+            trackerN_ims[idx], trackerP_ims[idx], emcal_ims[idx], hcal_ims[idx], truth_ims[idx], num_samples
+        )
+        
+        _, mse = train_and_predict(trackerN_samples, trackerP_samples, emcal_samples, hcal_samples, truth_samples, height, width)
+        test_mses.append(mse)
+    
+    print(f"\nMean Test MSE: {np.mean(test_mses):.4f}")
+    return np.mean(mses)
+
+def process_and_print_results():
+    base_path = "/Users/a90/Desktop/gauss2.0"
+    mse = process_set(base_path)
+    print(f"\nMean Training MSE: {mse:.4f}")
+
+process_and_print_results()
