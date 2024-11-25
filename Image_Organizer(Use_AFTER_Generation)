@@ -1,0 +1,27 @@
+import os
+import shutil
+
+base_path = "/Users/a90/Desktop/gauss3.01.0_0.3_NL"
+
+categories = ["emcal", "hcal", "trkn", "trkp", "truth"]
+
+for category in categories:
+    folder_path = os.path.join(base_path, category)
+    os.makedirs(folder_path, exist_ok=True)  
+
+def classify_and_move_files():
+    for file_name in os.listdir(base_path):
+
+        file_path = os.path.join(base_path, file_name)
+        if not os.path.isfile(file_path):
+            continue
+
+        for category in categories:
+            if category in file_name.lower():
+                dest_path = os.path.join(base_path, category, file_name)
+                shutil.move(file_path, dest_path) 
+                print(f"Moved {file_name} to {category} folder.")
+                break
+
+if __name__ == "__main__":
+    classify_and_move_files()
