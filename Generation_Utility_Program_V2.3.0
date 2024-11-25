@@ -1,0 +1,125 @@
+import os
+import shutil
+import numpy as np
+import matplotlib.pyplot as plt
+import skimage.io as io
+
+PartMult = 10
+base_path = "/Users/a90/Desktop/gauss2.0"
+categories = ["emcal", "hcal", "trackerN", "trackerP", "truth"]
+
+kNeutralPiFrac = 0.25
+kNeutralHadFrac = 0.5
+kMaxEta = 2.5
+kBField = 0.5
+kNEvent = 10000
+kImSize = 56
+kResScale = 1.0
+kTRKres = 0.05 * kResScale
+kEMCres = 0.05 * kResScale
+kHCALres = 0.1 * kResScale
+kNonLin = 0.3
+kMinTrackE = 0.1
+kMinEmcalE = 0.2
+kMinHcalE = 0.3
+
+os.makedirs(base_path, exist_ok=True)
+for category in categories:
+    os.makedirs(os.path.join(base_path, category), exist_ok=True)
+
+print(f"Write to {base_path}")
+
+Charge = np.empty(PartMult)
+Hadron = np.empty(PartMult)
+Energy = np.empty(PartMult)
+eta = np.empty(PartMult)
+phi = np.empty(PartMult)
+WTruth = np.empty(PartMult)
+
+for n in range(kNEvent):
+    if n % 100 == 0:
+        print(f"Generating event {n}")
+    for i in range(PartMult):
+        Energy[i] = abs(np.random.normal() + np.random.normal(0, 2))
+        WTruth[i] = Energy[i]
+        x = np.random.rand()
+        if x < kNeutralPiFrac:
+            Charge[i] = 0
+            Hadron[i] = 0
+        elif x < kNeutralHadFrac:
+            Charge[i] = 0
+            Hadron[i] = 1
+        else:
+            Charge[i] = 1 if np.random.rand() > 0.5 else -1
+            Hadron[i] = 1
+        eta[i] = (np.random.rand() - 0.5) * (2 if Charge[i] == 0 else 0.5) * kMaxEta
+        phi[i] = (np.random.rand() - 0.5) * (2 if Charge[i] == 0 else 0.5) * np.pi
+
+    c_truth, xe, ye = np.histogram2d(
+        eta, phi, weights=WTruth, range=[[-kMaxEta, kMaxEta], [-np.pi, np.pi]], bins=(kImSize, kImSize)
+    )
+
+    WTrkP = np.zeros(PartMult)
+    for i in range(PartMult):
+        if Charge[i] > 0 and Energy[i] > kMinTrackE:
+            WTrkP[i] = Energy[i] * np.random.normal(1, kTRKres)
+
+    c_trkp, xe, ye = np.histogram2d(
+        eta, phi, weights=WTrkP, range=[[-kMaxEta, kMaxEta], [-np.pi, np.pi]], bins=(kImSize, kImSize)
+    )
+    
+    WTrkN = np.zeros(PartMult)
+    for i in range(PartMult):
+        if Charge[i] < 0 and Energy[i] > kMinTrackE:
+            WTrkN[i] = Energy[i] * np.random.normal(1, kTRKres)
+
+    c_trkn, xe, ye = np.histogram2d(
+        eta, phi, weights=WTrkN, range=[[-kMaxEta, kMaxEta], [-np.pi, np.pi]], bins=(kImSize, kImSize)
+    )
+
+    for i in range(PartMult):
+        phi[i] += kBField * (1 / Energy[i]) * (1 if Charge[i] > 0 else -1)
+
+    WEmcal = np.zeros(PartMult)
+    for i in range(PartMult):
+        if Hadron[i] == 0 and Energy[i] > kMinEmcalE:
+            WEmcal[i] = (Energy[i] - kNonLin * np.sqrt(Energy[i])) * 0.9 * np.random.normal(1, kEMCres)
+            Energy[i] *= 0.1
+        elif Energy[i] > kMinEmcalE:
+            WEmcal[i] = Energy[i] * 0.1 * np.random.normal(1, kEMCres)
+            Energy[i] *= 0.9
+
+    c_emcal, xe, ye = np.histogram2d(
+        eta, phi, weights=WEmcal, range=[[-kMaxEta, kMaxEta], [-np.pi, np.pi]], bins=(kImSize, kImSize)
+    )
+
+    WHcal = np.zeros(PartMult)
+    for i in range(PartMult):
+        if Energy[i] > kMinHcalE:
+            WHcal[i] = (Energy[i] - kNonLin * np.sqrt(Energy[i])) * 0.9 * np.random.normal(1, kHCALres)
+            Energy[i] *= 0.1
+
+    c_hcal, xe, ye = np.histogram2d(
+        eta, phi, weights=WHcal, range=[[-kMaxEta, kMaxEta], [-np.pi, np.pi]], bins=(kImSize, kImSize)
+    )
+
+    io.imsave(os.path.join(base_path, f"truth_{n}.tiff"), c_truth)
+    io.imsave(os.path.join(base_path, f"trkp_{n}.tiff"), c_trkp)
+    io.imsave(os.path.join(base_path, f"trkn_{n}.tiff"), c_trkn)
+    io.imsave(os.path.join(base_path, f"emcal_{n}.tiff"), c_emcal)
+    io.imsave(os.path.join(base_path, f"hcal_{n}.tiff"), c_hcal)
+
+def classify_and_move_files():
+    for file_name in os.listdir(base_path):
+        file_path = os.path.join(base_path, file_name)
+        if not os.path.isfile(file_path):
+            continue
+        for category in categories:
+            if category in file_name.lower():
+                dest_path = os.path.join(base_path, category, file_name)
+                shutil.move(file_path, dest_path)
+                print(f"Moved {file_name} to {category} folder.")
+                break
+
+if __name__ == "__main__":
+    classify_and_move_files()
